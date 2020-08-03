@@ -56,107 +56,179 @@ fn main() {
 
     // create a filter
     // original ffmpeg filter:
-    let mut filter = filter::Graph::new();
+    let mut filter = {
+        let mut filter = filter::Graph::new();
 
-    filter
-        .add(
-            &filter::find("buffer").unwrap(),
-            // type
-            "in",
-            // params
-            &buffer_params,
-        )
-        .unwrap();
+        filter
+            .add(
+                &filter::find("buffer").unwrap(),
+                // name
+                "in",
+                // params
+                &buffer_params,
+            )
+            .unwrap();
 
-    filter
-        .add(
-            &filter::find("buffersink").unwrap(),
-            // type
-            "out",
-            // params empty
-            "",
-        )
-        .unwrap();
+        filter
+            .add(
+                &filter::find("buffersink").unwrap(),
+                // name
+                "out",
+                // params empty
+                "",
+            )
+            .unwrap();
 
-    // set in pixel format
-    {
-        let mut inp = filter.get("in").unwrap();
-        inp.set_pixel_format(decoder.format());
-    }
+        // set in pixel format
+        {
+            let mut inp = filter.get("in").unwrap();
+            inp.set_pixel_format(decoder.format());
 
-    // set out pixel format
-    {
-        let mut out = filter.get("out").unwrap();
-        out.set_pixel_format(ffmpeg::format::Pixel::NV12);
-        // out.set_pixel_format(ffmpeg::format::Pixel::BGRZ);
-    }
+            /*
+            unsafe {
+                (*inp.as_mut_ptr()).nb_threads = 4;
+            }
+            */
+        }
 
-    // it appears this should be done in one statement
-    filter
-        .output("in", 0)
-        .unwrap()
-        .input("out", 0)
-        .unwrap()
-        .parse("copy")
-        .unwrap();
+        // set out pixel format
+        {
+            let mut out = filter.get("out").unwrap();
+            out.set_pixel_format(ffmpeg::format::Pixel::NV12);
+            // out.set_pixel_format(ffmpeg::format::Pixel::BGRZ);
 
-    filter.validate().unwrap();
+            /*
+            unsafe {
+                (*out.as_mut_ptr()).nb_threads = 4;
+            }
+            */
+        }
 
-    println!("Created a filter:\n{}", filter.dump());
+        // scaler and format converter
+        {}
+
+        // it appears this should be done in one statement
+        filter
+            .output("in", 0)
+            .unwrap()
+            .input("out", 0)
+            .unwrap()
+            .parse("scale")
+            .unwrap();
+
+        // set scaling threads
+        {
+            let mut out = filter.get("Parsed_scale_0").unwrap();
+
+            unsafe {
+                (*out.as_mut_ptr()).nb_threads = 8;
+            }
+        }
+
+        filter.validate().unwrap();
+
+        println!("Created a filter:\n{}", filter.dump());
+
+        filter
+    };
+
+    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264).unwrap();
+
+    let mut octx = ffmpeg::format::output_as(&"/tmp/test.ts", "mpegts").unwrap();
+
+    let mut encoder = {
+        let stream = octx.add_stream(encoding_codec).unwrap();
+        let mut encoder = stream.codec().encoder().video().unwrap();
+
+        // various parameters
+        //
+
+        encoder.set_time_base(decoder.time_base());
+        encoder.set_format(ffmpeg::format::Pixel::NV12);
+        encoder.set_width(decoder.width());
+        encoder.set_height(decoder.height());
+        encoder.set_frame_rate(decoder.frame_rate());
+
+        encoder.open_as(encoding_codec).unwrap()
+    };
+
+    octx.write_header().unwrap();
 
     let video_stream_index = input.index();
 
+    let in_time_base = decoder.time_base();
+    let out_time_base = octx.stream(0).unwrap().time_base();
+
+    // some timing counter shit
     let mut frames = 0;
     let mut capture_start = Instant::now();
-    let mut decoded = frame::Video::empty();
-
     let mut decode_counter = Duration::new(0, 0);
     let mut filter_counter = Duration::new(0, 0);
+    let mut encode_counter = Duration::new(0, 0);
 
     for (stream, packet) in ictx.packets() {
         if stream.index() != video_stream_index {
             continue;
         }
 
-        // decode step
+        let mut decoded = frame::Video::empty();
+
         {
+            // decode step
             let decode_start = Instant::now();
             decoder.decode(&packet, &mut decoded).unwrap();
+
             decode_counter += decode_start.elapsed();
+
+            let mut filtered = frame::Video::empty();
 
             // filter feed step
             let filter_start = Instant::now();
-            filter.get("in").unwrap().source().add(&decoded).unwrap();
-
-            // sink filter
-            let mut a = 0;
-            while let Ok(..) = filter.get("out").unwrap().sink().frame(&mut decoded) {
-                a += 1;
+            {
+                filter.get("in").unwrap().source().add(&decoded).unwrap();
+                // sink filter
+                while let Ok(..) = filter.get("out").unwrap().sink().frame(&mut filtered) {
+                    println!("filtered");
+                }
             }
-            if a >= 2 {
-                panic!("Too many sinks: {}");
-            }
-
             filter_counter += filter_start.elapsed();
 
+            // encode
+            let encode_start = Instant::now();
+            {
+                let mut to_stream = ffmpeg::Packet::empty();
+
+                if encoder.encode(&filtered, &mut to_stream).is_ok() {
+                    if to_stream.size() > 0 {
+                        println!("Encoded packet: {:?}", to_stream.size());
+                        to_stream.set_stream(0);
+                        // to_stream.set_pts(packet.pts());
+                        to_stream.set_pts(packet.pts());
+                        to_stream.rescale_ts(in_time_base, out_time_base);
+                        println!("set pts ok");
+                        to_stream.write_interleaved(&mut octx).unwrap();
+                        println!("Wrote packet");
+                    }
+                }
+            }
+            encode_counter += encode_start.elapsed();
+
+            // fps stuff
             frames += 1;
 
-            let fps = 60.0 / capture_start.elapsed().as_secs_f32();
-
             if frames % 60 == 0 {
-                let lstart = Instant::now();
-
                 println!(
-                    "Frames: {}\t\tDecode: {:?}\t\tFilter: {:?}\n",
-                    fps,
+                    "Frames: {}\t\tDecode: {:?}\t\tFilter: {:?}\t\tEncode: {:?}\n",
+                    60.0 / capture_start.elapsed().as_secs_f32(),
                     decode_counter.div_f32(60.0),
                     filter_counter.div_f32(60.0),
+                    encode_counter.div_f32(60.0),
                 );
+
                 capture_start = Instant::now();
                 decode_counter = Duration::new(0, 0);
                 filter_counter = Duration::new(0, 0);
-
-                println!("Eh: {:?}", lstart.elapsed());
+                encode_counter = Duration::new(0, 0);
             }
         }
     }
