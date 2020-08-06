@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 ffmpeg-next = { "path" = "/home/user/krolld/rust-ffmpeg" }
+ffmpeg-sys-next = "4.3.3"

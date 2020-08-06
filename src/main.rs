@@ -1,10 +1,23 @@
 extern crate ffmpeg_next as ffmpeg;
+extern crate ffmpeg_sys_next as sys;
 
 use ffmpeg::filter;
 use ffmpeg::frame;
 use ffmpeg::media::Type;
 use ffmpeg::Dictionary;
+use ffmpeg::Error;
+
+use std::ffi::CString;
 use std::time::{Duration, Instant};
+
+macro_rules! check {
+    ($expr:expr) => {
+        match $expr {
+            0 => Ok(()),
+            e => Err(Error::from(e)),
+        }
+    };
+}
 
 fn main() {
     ffmpeg::init().unwrap();
@@ -43,7 +56,7 @@ fn main() {
     // set parameters (dunno which)
     decoder.set_parameters(input.parameters()).unwrap();
 
-    println!("Input format: {}", decoder.format() as u32);
+    eprintln!("Input format: {}", decoder.format() as u32);
 
     let buffer_params = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}",
@@ -118,36 +131,80 @@ fn main() {
 
         // set scaling threads
         {
-            let mut out = filter.get("Parsed_scale_0").unwrap();
-
-            unsafe {
-                (*out.as_mut_ptr()).nb_threads = 8;
-            }
+            let mut _out = filter.get("Parsed_scale_0").unwrap();
         }
 
         filter.validate().unwrap();
 
-        println!("Created a filter:\n{}", filter.dump());
+        eprintln!("Created a filter:\n{}", filter.dump());
 
         filter
     };
 
     let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264).unwrap();
 
-    let mut octx = ffmpeg::format::output_as(&"/tmp/test.ts", "mpegts").unwrap();
+    let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
     let mut encoder = {
         let stream = octx.add_stream(encoding_codec).unwrap();
-        let mut encoder = stream.codec().encoder().video().unwrap();
 
-        // various parameters
-        //
+        let codec = stream.codec();
+
+        let mut encoder = codec.encoder().video().unwrap();
+
+        /*
+        unsafe {
+            let pd = (*encoder.as_mut_ptr()).priv_data;
+
+            let name = CString::new("preset").unwrap();
+            let value = CString::new("ultrafast").unwrap();
+
+            check!(sys::av_opt_set(
+                pd,
+                name.as_ptr(),
+                value.as_ptr(),
+                sys::AV_OPT_SEARCH_CHILDREN
+            ))
+        }
+        .unwrap();
+        */
+
+        unsafe {
+            let pd = (*encoder.as_mut_ptr()).priv_data;
+
+            let name = CString::new("tune").unwrap();
+            let value = CString::new("zerolatency").unwrap();
+
+            check!(sys::av_opt_set(
+                pd,
+                name.as_ptr(),
+                value.as_ptr(),
+                sys::AV_OPT_SEARCH_CHILDREN
+            ))
+        }
+        .unwrap();
+
+        unsafe {
+            let pd = (*encoder.as_mut_ptr()).priv_data;
+
+            let name = CString::new("preset").unwrap();
+            let value = CString::new("ultrafast").unwrap();
+
+            check!(sys::av_opt_set(
+                pd,
+                name.as_ptr(),
+                value.as_ptr(),
+                sys::AV_OPT_SEARCH_CHILDREN
+            ))
+        }
+        .unwrap();
 
         encoder.set_time_base(decoder.time_base());
         encoder.set_format(ffmpeg::format::Pixel::NV12);
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
+        // encoder.set_bit_rate(1000);
 
         encoder.open_as(encoding_codec).unwrap()
     };
@@ -171,6 +228,8 @@ fn main() {
             continue;
         }
 
+        eprintln!("Incoming pts: {:?}", packet.pts());
+
         let mut decoded = frame::Video::empty();
 
         {
@@ -188,7 +247,7 @@ fn main() {
                 filter.get("in").unwrap().source().add(&decoded).unwrap();
                 // sink filter
                 while let Ok(..) = filter.get("out").unwrap().sink().frame(&mut filtered) {
-                    println!("filtered");
+                    eprintln!("filtered");
                 }
             }
             filter_counter += filter_start.elapsed();
@@ -198,26 +257,26 @@ fn main() {
             {
                 let mut to_stream = ffmpeg::Packet::empty();
 
-                if encoder.encode(&filtered, &mut to_stream).is_ok() {
-                    if to_stream.size() > 0 {
-                        println!("Encoded packet: {:?}", to_stream.size());
-                        to_stream.set_stream(0);
-                        // to_stream.set_pts(packet.pts());
-                        to_stream.set_pts(packet.pts());
-                        to_stream.rescale_ts(in_time_base, out_time_base);
-                        println!("set pts ok");
-                        to_stream.write_interleaved(&mut octx).unwrap();
-                        println!("Wrote packet");
-                    }
-                }
+                encoder.encode(&filtered, &mut to_stream).unwrap();
+
+                eprintln!("Encoded packet: {:?}", to_stream.size());
+                to_stream.set_stream(0);
+                // to_stream.set_pts(packet.pts());
+
+                to_stream.set_pts(packet.pts());
+                to_stream.rescale_ts(in_time_base, out_time_base);
+                eprintln!("set pts ok");
+                to_stream.write_interleaved(&mut octx).unwrap();
+                eprintln!("Wrote packet");
             }
+
             encode_counter += encode_start.elapsed();
 
             // fps stuff
             frames += 1;
 
             if frames % 60 == 0 {
-                println!(
+                eprintln!(
                     "Frames: {}\t\tDecode: {:?}\t\tFilter: {:?}\t\tEncode: {:?}\n",
                     60.0 / capture_start.elapsed().as_secs_f32(),
                     decode_counter.div_f32(60.0),
@@ -233,5 +292,5 @@ fn main() {
         }
     }
 
-    println!("Context opened!")
+    eprintln!("Context opened!")
 }

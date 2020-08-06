@@ -171,6 +171,7 @@ name = "krolld"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
+ "ffmpeg-sys-next",
 ]
 
 [[package]]
