@@ -146,7 +146,11 @@ fn main() {
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
     let mut encoder = {
-        let stream = octx.add_stream(encoding_codec).unwrap();
+        let mut stream = octx.add_stream(encoding_codec).unwrap();
+
+        // stream.set_time_base(decoder.time_base() );
+
+        stream.set_time_base(decoder.time_base());
 
         let codec = stream.codec();
 
@@ -252,6 +256,8 @@ fn main() {
             }
             filter_counter += filter_start.elapsed();
 
+            eprintln!("filtered pts: {:?}", filtered.pts());
+
             // encode
             let encode_start = Instant::now();
             {
@@ -262,9 +268,12 @@ fn main() {
                 eprintln!("Encoded packet: {:?}", to_stream.size());
                 to_stream.set_stream(0);
                 // to_stream.set_pts(packet.pts());
+                //
+                //
+                eprintln!("Encoded pts: {:?}", to_stream.pts());
 
                 to_stream.set_pts(packet.pts());
-                to_stream.rescale_ts(in_time_base, out_time_base);
+                // to_stream.rescale_ts(in_time_base, out_time_base);
                 eprintln!("set pts ok");
                 to_stream.write_interleaved(&mut octx).unwrap();
                 eprintln!("Wrote packet");
