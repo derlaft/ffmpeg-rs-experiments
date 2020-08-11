@@ -5,19 +5,8 @@ use ffmpeg::filter;
 use ffmpeg::frame;
 use ffmpeg::media::Type;
 use ffmpeg::Dictionary;
-use ffmpeg::Error;
 
-use std::ffi::CString;
 use std::time::{Duration, Instant};
-
-macro_rules! check {
-    ($expr:expr) => {
-        match $expr {
-            0 => Ok(()),
-            e => Err(Error::from(e)),
-        }
-    };
-}
 
 fn main() {
     ffmpeg::init().unwrap();
@@ -53,18 +42,21 @@ fn main() {
 
     // create video decoder
     let mut decoder = input.codec().decoder().video().unwrap();
+
     // set parameters (dunno which)
     decoder.set_parameters(input.parameters()).unwrap();
 
     eprintln!("Input format: {}", decoder.format() as u32);
 
     let buffer_params = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}",
+        "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
         decoder.width(),
         decoder.height(),
         decoder.format().descriptor().unwrap().name(),
-        decoder.time_base(),
-        decoder.aspect_ratio(),
+        input.time_base().numerator(),
+        input.time_base().denominator(),
+        decoder.aspect_ratio().numerator(),
+        decoder.aspect_ratio().denominator(),
     );
 
     // create a filter
@@ -107,14 +99,7 @@ fn main() {
         // set out pixel format
         {
             let mut out = filter.get("out").unwrap();
-            out.set_pixel_format(ffmpeg::format::Pixel::NV12);
-            // out.set_pixel_format(ffmpeg::format::Pixel::BGRZ);
-
-            /*
-            unsafe {
-                (*out.as_mut_ptr()).nb_threads = 4;
-            }
-            */
+            out.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
         }
 
         // scaler and format converter
@@ -141,83 +126,47 @@ fn main() {
         filter
     };
 
-    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264).unwrap();
+    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::HEVC).unwrap();
 
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
     let mut encoder = {
         let mut stream = octx.add_stream(encoding_codec).unwrap();
 
-        // stream.set_time_base(decoder.time_base() );
-
-        stream.set_time_base(decoder.time_base());
+        stream.set_time_base(input.time_base());
 
         let codec = stream.codec();
 
         let mut encoder = codec.encoder().video().unwrap();
 
-        /*
-        unsafe {
-            let pd = (*encoder.as_mut_ptr()).priv_data;
+        let codec_opts = {
+            let mut dict = Dictionary::new();
 
-            let name = CString::new("preset").unwrap();
-            let value = CString::new("ultrafast").unwrap();
+            dict.set("preset", "ultrafast");
+            dict.set("tune", "zerolatency");
 
-            check!(sys::av_opt_set(
-                pd,
-                name.as_ptr(),
-                value.as_ptr(),
-                sys::AV_OPT_SEARCH_CHILDREN
-            ))
-        }
-        .unwrap();
-        */
+            dict
+        };
 
-        unsafe {
-            let pd = (*encoder.as_mut_ptr()).priv_data;
+        eprintln!("input time base: {:?}", input.time_base());
 
-            let name = CString::new("tune").unwrap();
-            let value = CString::new("zerolatency").unwrap();
-
-            check!(sys::av_opt_set(
-                pd,
-                name.as_ptr(),
-                value.as_ptr(),
-                sys::AV_OPT_SEARCH_CHILDREN
-            ))
-        }
-        .unwrap();
-
-        unsafe {
-            let pd = (*encoder.as_mut_ptr()).priv_data;
-
-            let name = CString::new("preset").unwrap();
-            let value = CString::new("ultrafast").unwrap();
-
-            check!(sys::av_opt_set(
-                pd,
-                name.as_ptr(),
-                value.as_ptr(),
-                sys::AV_OPT_SEARCH_CHILDREN
-            ))
-        }
-        .unwrap();
-
-        encoder.set_time_base(decoder.time_base());
-        encoder.set_format(ffmpeg::format::Pixel::NV12);
+        encoder.set_time_base(input.time_base());
+        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
-        // encoder.set_bit_rate(1000);
+        encoder.set_bit_rate(5000);
 
-        encoder.open_as(encoding_codec).unwrap()
+        encoder.open_as_with(encoding_codec, codec_opts).unwrap()
     };
+
+    // encoder.set_bit_rate(5);
 
     octx.write_header().unwrap();
 
     let video_stream_index = input.index();
 
-    let in_time_base = decoder.time_base();
+    let in_time_base = input.time_base();
     let out_time_base = octx.stream(0).unwrap().time_base();
 
     // some timing counter shit
@@ -232,14 +181,14 @@ fn main() {
             continue;
         }
 
-        eprintln!("Incoming pts: {:?}", packet.pts());
-
         let mut decoded = frame::Video::empty();
 
         {
             // decode step
             let decode_start = Instant::now();
-            decoder.decode(&packet, &mut decoded).unwrap();
+
+            decoder.send_packet(&packet).unwrap();
+            decoder.receive_frame(&mut decoded).unwrap();
 
             decode_counter += decode_start.elapsed();
 
@@ -250,39 +199,45 @@ fn main() {
             {
                 filter.get("in").unwrap().source().add(&decoded).unwrap();
                 // sink filter
-                while let Ok(..) = filter.get("out").unwrap().sink().frame(&mut filtered) {
+                while filter
+                    .get("out")
+                    .unwrap()
+                    .sink()
+                    .frame(&mut filtered)
+                    .is_ok()
+                {
                     eprintln!("filtered");
                 }
             }
             filter_counter += filter_start.elapsed();
 
-            eprintln!("filtered pts: {:?}", filtered.pts());
-
             // encode
             let encode_start = Instant::now();
+
             {
                 let mut to_stream = ffmpeg::Packet::empty();
 
-                encoder.encode(&filtered, &mut to_stream).unwrap();
+                encoder.send_frame(&filtered).unwrap();
 
-                eprintln!("Encoded packet: {:?}", to_stream.size());
-                to_stream.set_stream(0);
-                // to_stream.set_pts(packet.pts());
-                //
-                //
-                eprintln!("Encoded pts: {:?}", to_stream.pts());
+                while encoder.receive_packet(&mut to_stream).is_ok() {
+                    // prepare packet for sending to octx
+                    to_stream.set_stream(0);
+                    to_stream.rescale_ts(in_time_base, out_time_base);
 
-                to_stream.set_pts(packet.pts());
-                // to_stream.rescale_ts(in_time_base, out_time_base);
-                eprintln!("set pts ok");
-                to_stream.write_interleaved(&mut octx).unwrap();
-                eprintln!("Wrote packet");
+                    // write packet to octx;
+                    to_stream.write_interleaved(&mut octx).unwrap();
+                }
             }
 
             encode_counter += encode_start.elapsed();
 
             // fps stuff
             frames += 1;
+
+            if frames == 60 * 5 {
+                eprintln!("Setting bitrate");
+                encoder.set_bit_rate(100000);
+            }
 
             if frames % 60 == 0 {
                 eprintln!(
