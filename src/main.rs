@@ -14,16 +14,62 @@ fn main() {
     // find x11grab device
     let x11grab = ffmpeg::format::list()
         .into_iter()
-        .find(|&ref x| x.name() == "x11grab")
+        .find(|&ref x| x.name() == "kmsgrab")
         .unwrap();
 
     // All the settings are listed here:
     // https://ffmpeg.org/ffmpeg-devices.html#x11grab
     let mut dict = Dictionary::new();
     dict.set("framerate", "60.01");
-    dict.set("draw_mouse", "0");
+    dict.set("format", "bgr0");
     // optional
     // dict.set("video_size", "1920x1080");
+
+    let hwctx_drm = unsafe {
+        let mut ctx = sys::av_hwdevice_ctx_alloc(sys::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM);
+
+        let card_id = "/dev/dri/renderD128\0";
+
+        let ret = sys::av_hwdevice_ctx_create(
+            &mut ctx,
+            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
+            (card_id.as_ptr()) as *const _,
+            Dictionary::new().as_mut_ptr(),
+            0,
+        );
+
+        if ret < 0 {
+            eprintln!(
+                "Could not ctx_create: {:?}",
+                ffmpeg::util::error::Error::from(ret)
+            );
+        }
+
+        ctx
+    };
+
+    let hwctx_vaapi = unsafe {
+        let mut ctx = sys::av_hwdevice_ctx_alloc(sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI);
+
+        let card_id = "/dev/dri/renderD128\0";
+
+        let ret = sys::av_hwdevice_ctx_create(
+            &mut ctx,
+            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            (card_id.as_ptr()) as *const _,
+            Dictionary::new().as_mut_ptr(),
+            0,
+        );
+
+        if ret < 0 {
+            eprintln!(
+                "Could not ctx_create: {:?}",
+                ffmpeg::util::error::Error::from(ret)
+            );
+        }
+
+        ctx
+    };
 
     // TODO: configure it?
     let display = ":0".to_string();
@@ -43,10 +89,14 @@ fn main() {
     // create video decoder
     let mut decoder = input.codec().decoder().video().unwrap();
 
+    unsafe {
+        (*decoder.as_mut_ptr()).hw_frames_ctx = sys::av_buffer_ref(hwctx_drm);
+    }
+
     // set parameters (dunno which)
     decoder.set_parameters(input.parameters()).unwrap();
 
-    eprintln!("Input format: {}", decoder.format() as u32);
+    eprintln!("Input format: {:?}", decoder.format());
 
     let buffer_params = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
@@ -99,11 +149,14 @@ fn main() {
         // set out pixel format
         {
             let mut out = filter.get("out").unwrap();
-            out.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
+
+            // out.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
         }
 
         // scaler and format converter
         {}
+
+        ffmpeg::util::log::set_level(ffmpeg::log::Level::Trace);
 
         // it appears this should be done in one statement
         filter
@@ -111,13 +164,29 @@ fn main() {
             .unwrap()
             .input("out", 0)
             .unwrap()
-            .parse("scale")
+            .parse("hwmap=derive_device=drm,hwmap=derive_device=vaapi,scale_vaapi=1920:1080:nv12")
             .unwrap();
 
         // set scaling threads
+        /*
         {
             let mut _out = filter.get("Parsed_scale_0").unwrap();
         }
+        */
+
+        unsafe {
+            let mut hwmap = filter.get("Parsed_hwmap_0").unwrap();
+            // hwmap.set_pixel_format(ffmpeg::format::Pixel::VAAPI_VLD);
+
+            (*hwmap.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_drm);
+        };
+
+        unsafe {
+            let mut hwmap = filter.get("Parsed_hwmap_1").unwrap();
+            // hwmap.set_pixel_format(ffmpeg::format::Pixel::VAAPI_VLD);
+
+            (*hwmap.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        };
 
         filter.validate().unwrap();
 
@@ -126,7 +195,7 @@ fn main() {
         filter
     };
 
-    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::HEVC).unwrap();
+    let encoding_codec = ffmpeg::encoder::find_by_name("h264_vaapi").unwrap();
 
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
@@ -138,6 +207,12 @@ fn main() {
         let codec = stream.codec();
 
         let mut encoder = codec.encoder().video().unwrap();
+
+        unsafe {
+            eprintln!("hwctx_vaapi: {:?}", *hwctx_vaapi);
+
+            (*encoder.as_mut_ptr()).hw_frames_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        }
 
         let codec_opts = {
             let mut dict = Dictionary::new();
@@ -151,7 +226,7 @@ fn main() {
         eprintln!("input time base: {:?}", input.time_base());
 
         encoder.set_time_base(input.time_base());
-        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+        encoder.set_format(ffmpeg::format::Pixel::VAAPI_VLD);
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
