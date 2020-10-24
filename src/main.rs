@@ -7,6 +7,7 @@ use ffmpeg::media::Type;
 use ffmpeg::util::log;
 use ffmpeg::Dictionary;
 
+use std::ptr;
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -127,7 +128,7 @@ fn main() {
         // set out pixel format
         {
             let mut out = filter.get("out").unwrap();
-            out.set_pixel_format(ffmpeg::format::Pixel::NV12);
+            out.set_pixel_format(ffmpeg::format::Pixel::VAAPI_VLD);
         }
 
         // scaler and format converter
@@ -139,7 +140,7 @@ fn main() {
             .unwrap()
             .input("out", 0)
             .unwrap()
-            .parse("hwupload,scale_vaapi=format=nv12,hwdownload")
+            .parse("hwupload,scale_vaapi=format=nv12")
             .unwrap();
 
         // set scaling threads
@@ -160,10 +161,6 @@ fn main() {
             (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
         }
         unsafe {
-            let mut filter = filter.get("Parsed_hwdownload_2").unwrap();
-            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
-        }
-        unsafe {
             let mut filter = filter.get("out").unwrap();
             (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
         }
@@ -175,7 +172,7 @@ fn main() {
         filter
     };
 
-    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264).unwrap();
+    let encoding_codec = ffmpeg::encoder::find_by_name("h264_vaapi").unwrap();
 
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
@@ -200,11 +197,39 @@ fn main() {
         eprintln!("input time base: {:?}", input.time_base());
 
         encoder.set_time_base(input.time_base());
-        encoder.set_format(ffmpeg::format::Pixel::NV12);
+        // encoder.set_format(ffmpeg::format::Pixel::NV12);
+        encoder.set_format(ffmpeg::format::Pixel::VAAPI_VLD);
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
         // encoder.set_bit_rate(5000);
+
+        unsafe {
+            eprintln!("hwctx_vaapi: {:?}", *hwctx_vaapi);
+
+            // (*encoder.as_mut_ptr()).hw_frames_ctx = sys::av_buffer_ref(hwctx_vaapi);
+
+            // create frames ctx
+            let hw_frames_ref = sys::av_hwframe_ctx_alloc(hwctx_vaapi);
+
+            let mut frames_ctx =
+                ((*(hw_frames_ref as *mut sys::AVBufferRef)).data as *mut sys::AVHWFramesContext);
+
+            eprintln!("frames_ctx: {:?}", frames_ctx);
+
+            (*frames_ctx).format = ffmpeg::format::Pixel::VAAPI_VLD.into();
+            (*frames_ctx).sw_format = ffmpeg::format::Pixel::NV12.into();
+            (*frames_ctx).width = decoder.width() as i32;
+            (*frames_ctx).height = decoder.height() as i32;
+            (*frames_ctx).initial_pool_size = 20;
+
+            eprintln!("frames_ctx: {:?}", *frames_ctx);
+
+            // print some debug stuff
+
+            // TODO proper memory management
+            (*encoder.as_mut_ptr()).hw_frames_ctx = sys::av_buffer_ref(hw_frames_ref);
+        }
 
         encoder.open_with(codec_opts).unwrap()
     };
