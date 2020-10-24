@@ -4,12 +4,14 @@ extern crate ffmpeg_sys_next as sys;
 use ffmpeg::filter;
 use ffmpeg::frame;
 use ffmpeg::media::Type;
+use ffmpeg::util::log;
 use ffmpeg::Dictionary;
 
 use std::time::{Duration, Instant};
 
 fn main() {
     ffmpeg::init().unwrap();
+    log::set_level(log::Level::Debug);
 
     // find x11grab device
     let x11grab = ffmpeg::format::list()
@@ -20,8 +22,10 @@ fn main() {
     // All the settings are listed here:
     // https://ffmpeg.org/ffmpeg-devices.html#x11grab
     let mut dict = Dictionary::new();
+    dict.set("probesize", "42M");
     dict.set("framerate", "60.01");
     dict.set("draw_mouse", "0");
+    dict.set("fflags", "nobuffer");
     // optional
     // dict.set("video_size", "1920x1080");
 
@@ -126,7 +130,7 @@ fn main() {
         filter
     };
 
-    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::HEVC).unwrap();
+    let encoding_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264).unwrap();
 
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
@@ -142,7 +146,7 @@ fn main() {
         let codec_opts = {
             let mut dict = Dictionary::new();
 
-            dict.set("preset", "ultrafast");
+            dict.set("preset", "fast");
             dict.set("tune", "zerolatency");
 
             dict
@@ -155,9 +159,9 @@ fn main() {
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
-        encoder.set_bit_rate(5000);
+        // encoder.set_bit_rate(5000);
 
-        encoder.open_as_with(encoding_codec, codec_opts).unwrap()
+        encoder.open_with(codec_opts).unwrap()
     };
 
     // encoder.set_bit_rate(5);
@@ -205,9 +209,7 @@ fn main() {
                     .sink()
                     .frame(&mut filtered)
                     .is_ok()
-                {
-                    eprintln!("filtered");
-                }
+                {}
             }
             filter_counter += filter_start.elapsed();
 
@@ -233,11 +235,6 @@ fn main() {
 
             // fps stuff
             frames += 1;
-
-            if frames == 60 * 5 {
-                eprintln!("Setting bitrate");
-                encoder.set_bit_rate(100000);
-            }
 
             if frames % 60 == 0 {
                 eprintln!(
