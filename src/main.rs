@@ -288,7 +288,7 @@ fn main() {
             filter_counter += filter_start.elapsed();
 
             // encode
-            let encode_start = Instant::now();
+            let mut encode_start = Instant::now();
 
             {
                 let mut to_stream = ffmpeg::Packet::empty();
@@ -299,6 +299,9 @@ fn main() {
                     // prepare packet for sending to octx
                     to_stream.set_stream(0);
                     to_stream.rescale_ts(in_time_base, out_time_base);
+
+                    encode_counter += encode_start.elapsed();
+                    encode_start = Instant::now();
 
                     // write packet to octx;
                     to_stream.write_interleaved(&mut octx).unwrap();
