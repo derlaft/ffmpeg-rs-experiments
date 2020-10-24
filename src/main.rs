@@ -89,9 +89,11 @@ fn main() {
     // create video decoder
     let mut decoder = input.codec().decoder().video().unwrap();
 
+    /*
     unsafe {
         (*decoder.as_mut_ptr()).hw_frames_ctx = sys::av_buffer_ref(hwctx_drm);
     }
+    */
 
     // set parameters (dunno which)
     decoder.set_parameters(input.parameters()).unwrap();
@@ -150,10 +152,11 @@ fn main() {
         {
             let mut out = filter.get("out").unwrap();
 
-            // out.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
+            out.set_pixel_format(ffmpeg::format::Pixel::NV12);
         }
 
         // scaler and format converter
+        // .parse("hwmap=derive_device=drm,hwmap=derive_device=vaapi,scale_vaapi=1920:1080:nv12")
         {}
 
         ffmpeg::util::log::set_level(ffmpeg::log::Level::Trace);
@@ -164,7 +167,8 @@ fn main() {
             .unwrap()
             .input("out", 0)
             .unwrap()
-            .parse("hwmap=derive_device=drm,hwmap=derive_device=vaapi,scale_vaapi=1920:1080:nv12")
+            // .parse("hwmap=derive_device=drm,hwmap=derive_device=vaapi,scale_vaapi=1920:1080:nv12")
+            .parse("format=nv12")
             .unwrap();
 
         // set scaling threads
@@ -174,19 +178,22 @@ fn main() {
         }
         */
 
+        /*
         unsafe {
-            let mut hwmap = filter.get("Parsed_hwmap_0").unwrap();
-            // hwmap.set_pixel_format(ffmpeg::format::Pixel::VAAPI_VLD);
+            let mut hwmap = filter.get("Parsed_hwdownload_0").unwrap();
 
             (*hwmap.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_drm);
         };
+        */
 
+        /*
         unsafe {
-            let mut hwmap = filter.get("Parsed_hwmap_1").unwrap();
+            let mut hwmap = filter.get("Parsed_hwupload_2").unwrap();
             // hwmap.set_pixel_format(ffmpeg::format::Pixel::VAAPI_VLD);
 
             (*hwmap.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
         };
+        */
 
         filter.validate().unwrap();
 
@@ -195,7 +202,7 @@ fn main() {
         filter
     };
 
-    let encoding_codec = ffmpeg::encoder::find_by_name("h264_vaapi").unwrap();
+    let encoding_codec = ffmpeg::encoder::find_by_name("h264").unwrap();
 
     let mut octx = ffmpeg::format::output_as(&"/dev/stdout", "mpegts").unwrap();
 
