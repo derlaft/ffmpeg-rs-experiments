@@ -188,8 +188,12 @@ fn main() {
         let codec_opts = {
             let mut dict = Dictionary::new();
 
-            dict.set("preset", "fast");
-            dict.set("tune", "zerolatency");
+            dict.set("rc_mode", "CBR");
+            // dict.set("quality", "10");
+            // dict.set("profile", "high");
+            // dict.set("profile", "high");
+            dict.set("profile", "constrained_baseline");
+            // dict.set("qp", "26");
 
             dict
         };
@@ -202,7 +206,7 @@ fn main() {
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
-        // encoder.set_bit_rate(5000);
+        encoder.set_bit_rate(100000000);
 
         unsafe {
             eprintln!("hwctx_vaapi: {:?}", *hwctx_vaapi);
