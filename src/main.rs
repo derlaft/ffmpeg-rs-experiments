@@ -11,7 +11,31 @@ use std::time::{Duration, Instant};
 
 fn main() {
     ffmpeg::init().unwrap();
-    log::set_level(log::Level::Debug);
+    log::set_level(log::Level::Verbose);
+    // log::set_level(log::Level::Trace);
+    //
+    let hwctx_vaapi = unsafe {
+        let mut ctx = sys::av_hwdevice_ctx_alloc(sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI);
+
+        let card_id = "/dev/dri/renderD128\0";
+
+        let ret = sys::av_hwdevice_ctx_create(
+            &mut ctx,
+            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            (card_id.as_ptr()) as *const _,
+            Dictionary::new().as_mut_ptr(),
+            0,
+        );
+
+        if ret < 0 {
+            eprintln!(
+                "Could not ctx_create: {:?}",
+                ffmpeg::util::error::Error::from(ret)
+            );
+        }
+
+        ctx
+    };
 
     // find x11grab device
     let x11grab = ffmpeg::format::list()
@@ -25,7 +49,7 @@ fn main() {
     dict.set("probesize", "42M");
     dict.set("framerate", "60.01");
     dict.set("draw_mouse", "0");
-    dict.set("fflags", "nobuffer");
+    dict.set("fflags", "nobuffer;flush_packets");
     // optional
     // dict.set("video_size", "1920x1080");
 
@@ -68,6 +92,12 @@ fn main() {
     let mut filter = {
         let mut filter = filter::Graph::new();
 
+        /*
+        unsafe {
+            (*filter.as_mut_ptr()).nb_threads = 4;
+        }
+        */
+
         filter
             .add(
                 &filter::find("buffer").unwrap(),
@@ -92,18 +122,12 @@ fn main() {
         {
             let mut inp = filter.get("in").unwrap();
             inp.set_pixel_format(decoder.format());
-
-            /*
-            unsafe {
-                (*inp.as_mut_ptr()).nb_threads = 4;
-            }
-            */
         }
 
         // set out pixel format
         {
             let mut out = filter.get("out").unwrap();
-            out.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
+            out.set_pixel_format(ffmpeg::format::Pixel::NV12);
         }
 
         // scaler and format converter
@@ -115,12 +139,33 @@ fn main() {
             .unwrap()
             .input("out", 0)
             .unwrap()
-            .parse("scale")
+            .parse("hwupload,scale_vaapi=format=nv12,hwdownload")
             .unwrap();
 
         // set scaling threads
         {
-            let mut _out = filter.get("Parsed_scale_0").unwrap();
+            // let mut _out = filter.get("Parsed_scale_0").unwrap();
+        }
+
+        unsafe {
+            let mut filter = filter.get("in").unwrap();
+            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        }
+        unsafe {
+            let mut filter = filter.get("Parsed_hwupload_0").unwrap();
+            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        }
+        unsafe {
+            let mut filter = filter.get("Parsed_scale_vaapi_1").unwrap();
+            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        }
+        unsafe {
+            let mut filter = filter.get("Parsed_hwdownload_2").unwrap();
+            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
+        }
+        unsafe {
+            let mut filter = filter.get("out").unwrap();
+            (*filter.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(hwctx_vaapi);
         }
 
         filter.validate().unwrap();
@@ -155,7 +200,7 @@ fn main() {
         eprintln!("input time base: {:?}", input.time_base());
 
         encoder.set_time_base(input.time_base());
-        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+        encoder.set_format(ffmpeg::format::Pixel::NV12);
         encoder.set_width(decoder.width());
         encoder.set_height(decoder.height());
         encoder.set_frame_rate(decoder.frame_rate());
