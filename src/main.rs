@@ -313,13 +313,15 @@ fn main() {
             // fps stuff
             frames += 1;
 
-            if frames % 60 == 0 {
+            const PROBE_RATE: f32 = 600.0;
+
+            if frames % PROBE_RATE as u32 == 0 {
                 eprintln!(
                     "Frames: {}\t\tDecode: {:?}\t\tFilter: {:?}\t\tEncode: {:?}\n",
-                    60.0 / capture_start.elapsed().as_secs_f32(),
-                    decode_counter.div_f32(60.0),
-                    filter_counter.div_f32(60.0),
-                    encode_counter.div_f32(60.0),
+                    PROBE_RATE / capture_start.elapsed().as_secs_f32(),
+                    decode_counter.div_f32(PROBE_RATE),
+                    filter_counter.div_f32(PROBE_RATE),
+                    encode_counter.div_f32(PROBE_RATE),
                 );
 
                 capture_start = Instant::now();
